@@ -140,6 +140,9 @@ parser.add_argument('--mft-assessment-full', action='store_true', help='enables 
 # TPC options
 parser.add_argument('--tpc-distortion-type', default=0, type=int, help='Simulate distortions in the TPC (0=no distortions, 1=distortions without scaling, 2=distortions with CTP scaling)')
 parser.add_argument('--ctp-scaler', default=0, type=float, help='CTP raw scaler value used for distortion simulation')
+# ITS3 reconstruction configuration
+parser.add_argument('--upgrade-its3', action='store_true', help='enable ITS3 upgrade simulation')
+
 # Global Forward reconstruction configuration
 parser.add_argument('--fwdmatching-assessment-full', action='store_true', help='enables complete assessment of global forward reco')
 parser.add_argument('--fwdmatching-4-param', action='store_true', help='excludes q/pt from matching parameters')
@@ -150,6 +153,10 @@ parser.add_argument('--fwdmatching-save-trainingdata', action='store_true', help
 
 args = parser.parse_args()
 print (args)
+
+modules = ' '
+if args.upgrade_its3:
+    modules = ' -m IT3 TPC TRD TOF PHS EMC HMP MFT MCH MID ZDC FT0 FV0 FDD CTP HALL MAG PIPE SHIL ABSO DIPO COMP '
 
 # make sure O2DPG + O2 is loaded
 O2DPG_ROOT=environ.get('O2DPG_ROOT')
@@ -210,6 +217,7 @@ def get_anchor_env_var(key, default):
 # certain detectors
 # these are all detectors that should be assumed active
 readout_detectors = args.readoutDets
+
 # here are all detectors that have been set in an anchored script
 activeDetectors = anchorConfig.get('o2-ctf-reader-workflow-options',{}).get('onlyDet','all')
 if activeDetectors == 'all':
@@ -497,6 +505,9 @@ if doembedding:
 
 # a list of smaller sensors (used to construct digitization tasks in a parametrized way)
 smallsensorlist = [ "ITS", "TOF", "FDD", "MCH", "MID", "MFT", "HMP", "PHS", "CPV", "ZDC" ]
+if args.upgrade_its3: # Replace ITS with ITS3
+    smallsensorlist[smallsensorlist.index("ITS")] = "IT3"
+
 # a list of detectors that serve as input for the trigger processor CTP --> these need to be processed together for now
 ctp_trigger_inputlist = [ "FT0", "FV0", "EMC" ]
 
@@ -618,6 +629,7 @@ for tf in range(1, NTIMEFRAMES + 1):
       exit(1)
    BCPATTERN=args.bcPatternFile
    includeQED = (COLTYPE == 'PbPb' or (doembedding and COLTYPEBKG == "PbPb")) or (args.with_qed == True)
+   includeQED = False
 
    # preproduce the collision context
    precollneeds=[GRP_TASK['name']]
@@ -648,7 +660,7 @@ for tf in range(1, NTIMEFRAMES + 1):
      #
      ########################################################################################################
      QED_task['cmd'] = 'o2-sim -e TGeant3 --field ccdb -j ' + str('1') +  ' -o qed_' + str(tf)                        \
-                        + ' -n ' + str(NEventsQED) + ' -m PIPE ITS MFT FT0 FV0 FDD '                                  \
+                        + ' -n ' + str(NEventsQED) + ' -m PIPE {} MFT FT0 FV0 FDD '.format("IT3" if args.upgrade_its3 else "ITS")                                  \
                         + ('', ' --timestamp ' + str(args.timestamp))[args.timestamp!=-1] + ' --run ' + str(args.run) \
                         + ' --seed ' + str(TFSEED)                                                                    \
                         + ' -g extgen --configKeyValues \"GeneratorExternal.fileName=$O2_ROOT/share/Generators/external/QEDLoader.C;QEDGenParam.yMin=-7;QEDGenParam.yMax=7;QEDGenParam.ptMin=0.001;QEDGenParam.ptMax=1.;Diamond.width[2]=6.\"'  # + (' ',' --fromCollContext collisioncontext.root')[args.pregenCollContext]
@@ -736,7 +748,6 @@ for tf in range(1, NTIMEFRAMES + 1):
                      + ' -g ' + str(GENERATOR) + ' ' + str(INIFILE) + ' -o genevents ' + embeddinto   \
                      + ('', ' --timestamp ' + str(args.timestamp))[args.timestamp!=-1]                \
                      + ' --seed ' + str(TFSEED) + ' -n ' + str(NSIGEVENTS)
-
    if args.pregenCollContext == True:
       SGNGENtask['cmd'] += ' --fromCollContext collisioncontext.root:' + signalprefix
    if GENERATOR=="hepmc":
@@ -749,8 +760,9 @@ for tf in range(1, NTIMEFRAMES + 1):
    SGNtask=createTask(name='sgnsim_'+str(tf), needs=signalneeds, tf=tf, cwd='tf'+str(tf), lab=["GEANT"],
                       relative_cpu=7/8, n_workers=NWORKERS_TF, mem=str(sgnmem))
    sgncmdbase = '${O2_ROOT}/bin/o2-sim -e ' + str(SIMENGINE) + ' '  + str(MODULES) + ' -n ' + str(NSIGEVENTS) + ' --seed ' + str(TFSEED)       \
-              + ' --field ccdb -j ' + str(NWORKERS_TF) + ' ' + str(CONFKEY) + ' ' + str(INIFILE) + ' -o ' + signalprefix + ' ' + embeddinto       \
-              + ('', ' --timestamp ' + str(args.timestamp))[args.timestamp!=-1] + ' --run ' + str(args.run)
+              + ' --field ccdb -j ' + str(NWORKERS_TF) + ' ' + str(CONFKEY) + ' ' + str(INIFILE) + ' -o ' + signalprefix + ' ' + embeddinto    \
+              + ('', ' --timestamp ' + str(args.timestamp))[args.timestamp!=-1] + ' --run ' + str(args.run) \
+              + modules
    if sep_event_mode:
       SGNtask['cmd'] = sgncmdbase + ' -g extkinO2 --extKinFile genevents_Kine.root ' + ' --vertexMode kNoVertex'
    else:
@@ -815,6 +827,7 @@ for tf in range(1, NTIMEFRAMES + 1):
                             "HBFUtils.nHBFPerTF" : orbitsPerTF,
                             "HBFUtils.orbitFirst" : args.first_orbit,
                             "HBFUtils.runNumber" : args.run }
+   globalDetectorConfigValues = { "GlobalParams.withITS3" : "true" if args.upgrade_its3 else "false", }
    # we set the timestamp here only if specified explicitely (otherwise it will come from
    # the simulation GRP and digitization)
    if (args.sor != -1):
@@ -840,14 +853,15 @@ for tf in range(1, NTIMEFRAMES + 1):
      return returnstring
 
    def putConfigValuesNew(listOfMainKeys=[], localCF = {}):
-     """
-     Creates the final --configValues string to be passed to the workflows.
-     Uses the globalTFConfigValues and applies other parameters on top
-     listOfMainKeys : list of keys to be applied from the global configuration object
-     localCF: a dictionary mapping key to param - possibly overrides settings taken from global config
+     """Creates the final --configValues string to be passed to the workflows.
+     Uses the globalTFConfigValues combined with globalDetectorConfigValues and
+     applies other parameters on top listOfMainKeys : list of keys to be applied
+     from the global configuration object localCF: a dictionary mapping key to
+     param - possibly overrides settings taken from global config
+
      """
      returnstring = ' --configKeyValues "'
-     cf = globalTFConfigValues.copy()
+     cf = globalTFConfigValues.copy() | globalDetectorConfigValues.copy()
      isfirst=True
 
      # now bring in the relevant keys
@@ -1082,11 +1096,13 @@ for tf in range(1, NTIMEFRAMES + 1):
    # END TPC reco
 
    ITSMemEstimate = 12000 if havePbPb else 2000 # PbPb has much large mem requirement for now (in worst case)
-   ITSRECOtask=createTask(name='itsreco_'+str(tf), needs=[getDigiTaskName("ITS")],
+   ITSRECOtask=createTask(name='itsreco_'+str(tf), needs=[getDigiTaskName(('ITS', 'IT3')[args.upgrade_its3])],
                           tf=tf, cwd=timeframeworkdir, lab=["RECO"], cpu='1', mem=str(ITSMemEstimate))
-   ITSRECOtask['cmd'] = '${O2_ROOT}/bin/o2-its-reco-workflow --trackerCA --tracking-mode async ' + getDPL_global_options(bigshm=havePbPb) \
-                        + putConfigValuesNew(["ITSVertexerParam", "ITSAlpideParam",
-                                              "ITSClustererParam", "ITSCATrackerParam"], {"NameConf.mDirMatLUT" : ".."})
+   if args.upgrade_its3:
+       ITSRECOtask['cmd'] = "${O2_ROOT}/bin/o2-its3-reco-workflow "
+   else:
+       ITSRECOtask['cmd'] = "${O2_ROOT}/bin/o2-its-reco-workflow --trackerCA "
+   ITSRECOtask['cmd'] += " --tracking-mode async " + getDPL_global_options(bigshm=havePbPb) + putConfigValuesNew(["ITSVertexerParam", "ITSAlpideParam", "ITSClustererParam", "ITSCATrackerParam"], {"NameConf.mDirMatLUT" : ".."})
    ITSRECOtask['cmd'] += ('',' --disable-mc')[args.no_mc_labels]
    workflow['stages'].append(ITSRECOtask)
 
@@ -1096,8 +1112,11 @@ for tf in range(1, NTIMEFRAMES + 1):
    workflow['stages'].append(FT0RECOtask)
 
    ITSTPCMATCHtask=createTask(name='itstpcMatch_'+str(tf), needs=[TPCRECOtask['name'], ITSRECOtask['name'], FT0RECOtask['name']], tf=tf, cwd=timeframeworkdir, lab=["RECO"], mem='8000', relative_cpu=3/8)
+   itstpcLocConf = {"NameConf.mDirMatLUT" : ".."}
+   if args.upgrade_its3:
+       itstpcLocConf["tpcitsMatch.runAfterBurner"] = "false"
    ITSTPCMATCHtask['cmd'] = '${O2_ROOT}/bin/o2-tpcits-match-workflow ' + getDPL_global_options(bigshm=True) + ' --tpc-track-reader \"tpctracks.root\" --tpc-native-cluster-reader \"--infile tpc-native-clusters.root\" --use-ft0' \
-                          + putConfigValuesNew(['MFTClustererParam', 'ITSCATrackerParam', 'tpcitsMatch', 'TPCGasParam', 'TPCCorrMap', 'ITSClustererParam', 'GPU_rec_tpc', 'trackTuneParams', 'ft0tag'], {"NameConf.mDirMatLUT" : ".."} | tpcLocalCFreco) \
+                          + putConfigValuesNew(['MFTClustererParam', 'ITSCATrackerParam', 'tpcitsMatch', 'TPCGasParam', 'TPCCorrMap', 'ITSClustererParam', 'GPU_rec_tpc', 'trackTuneParams', 'ft0tag'], itstpcLocConf | tpcLocalCFreco) \
                           + tpc_corr_scaling_options + tpc_corr_options_mc
    workflow['stages'].append(ITSTPCMATCHtask)
 
@@ -1369,15 +1388,16 @@ for tf in range(1, NTIMEFRAMES + 1):
                    readerCommand='o2-global-track-cluster-reader --track-types "ITS-TPC-TOF,TPC-TOF,TPC,ITS-TPC-TRD,ITS-TPC-TRD-TOF,TPC-TRD,TPC-TRD-TOF" --cluster-types none',
                    configFilePath='json://${O2DPG_ROOT}/MC/config/QC/json/tofMatchedTracks_AllTypes_direct_MC.json')
      ### ITS
-     addQCPerTF(taskName='ITSTrackSimTask',
-                needs=[ITSRECOtask['name']],
-                readerCommand='o2-global-track-cluster-reader --track-types "ITS" --cluster-types "ITS"',
-                configFilePath='json://${O2DPG_ROOT}/MC/config/QC/json/its-mc-tracks-qc.json')
+     if not args.upgrade_its3:
+        addQCPerTF(taskName='ITSTrackSimTask',
+                   needs=[ITSRECOtask['name']],
+                   readerCommand='o2-global-track-cluster-reader --track-types "ITS" --cluster-types "ITS"',
+                   configFilePath='json://${O2DPG_ROOT}/MC/config/QC/json/its-mc-tracks-qc.json')
 
-     addQCPerTF(taskName='ITSTracksClusters',
-                needs=[ITSRECOtask['name']],
-                readerCommand='o2-global-track-cluster-reader --track-types "ITS" --cluster-types "ITS"',
-                configFilePath='json://${O2DPG_ROOT}/MC/config/QC/json/its-clusters-tracks-qc.json')
+        addQCPerTF(taskName='ITSTracksClusters',
+                   needs=[ITSRECOtask['name']],
+                   readerCommand='o2-global-track-cluster-reader --track-types "ITS" --cluster-types "ITS"',
+                   configFilePath='json://${O2DPG_ROOT}/MC/config/QC/json/its-clusters-tracks-qc.json')
 
      ### CPV
      if isActive('CPV'):
