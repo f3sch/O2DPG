@@ -17,16 +17,19 @@
 #                             -col pp -eA 2.510 -proc "ccbar"  --embedding
 #
 
-import sys
-import importlib.util
 import argparse
-from os import environ, mkdir
-from os.path import join, dirname, isdir, isabs, isfile
-import random
-import json
+import importlib.util
 import itertools
+import json
 import math
-import requests, re
+import random
+import re
+import sys
+from os import environ, mkdir
+from os.path import dirname, isabs, isdir, isfile, join
+
+import requests
+
 pandas_available = True
 try:
     import pandas as pd
@@ -35,9 +38,13 @@ except (ImportError, ValueError):  # ARM architecture has problems with pandas +
 
 sys.path.append(join(dirname(__file__), '.', 'o2dpg_workflow_utils'))
 
-from o2dpg_workflow_utils import createTask, createGlobalInitTask, dump_workflow, adjust_RECO_environment, isActive, activate_detector, deactivate_detector, compute_n_workers
 from o2dpg_qc_finalization_workflow import include_all_QC_finalization
-from o2dpg_sim_config import create_sim_config, create_geant_config, constructConfigKeyArg
+from o2dpg_sim_config import (constructConfigKeyArg, create_geant_config,
+                              create_sim_config)
+from o2dpg_workflow_utils import (activate_detector, adjust_RECO_environment,
+                                  compute_n_workers, createGlobalInitTask,
+                                  createTask, deactivate_detector,
+                                  dump_workflow, isActive)
 
 parser = argparse.ArgumentParser(description='Create an ALICE (Run3) MC simulation workflow')
 
@@ -62,6 +69,9 @@ parser.add_argument('-trigger',help='event selection: particle, external', defau
 parser.add_argument('-ini',help='generator init parameters file (full paths required), for example: ${O2DPG_ROOT}/MC/config/PWGHF/ini/GeneratorHF.ini', default='')
 parser.add_argument('-confKey',help='generator or trigger configuration key values, for example: "GeneratorPythia8.config=pythia8.cfg;A.x=y"', default='')
 parser.add_argument('--readoutDets',help='comma separated string of detectors readout (does not modify material budget - only hit creation)', default='all')
+parser.add_argument('--detectorList', help='default detector configuration', default='ALICE2')
+parser.add_argument('--run4',action='store_true', help='Run 4 detectors')
+parser.add_argument('--apply-no-alignment',action='store_true', help='Do not apply any alignment objects to the geometry')
 parser.add_argument('--make-evtpool', help='Generate workflow for event pool creation.', action='store_true')
 
 parser.add_argument('-interactionRate',help='Interaction rate, used in digitization', default=-1)
@@ -182,7 +192,9 @@ o2dpg_analysis_test_workflow = importlib.util.module_from_spec(spec)
 sys.modules[module_name] = o2dpg_analysis_test_workflow
 spec.loader.exec_module(o2dpg_analysis_test_workflow)
 
-from o2dpg_analysis_test_workflow import add_analysis_tasks, add_analysis_qc_upload_tasks
+from o2dpg_analysis_test_workflow import (add_analysis_qc_upload_tasks,
+                                          add_analysis_tasks)
+
 
 # fetch an external configuration if given
 # loads the workflow specification
@@ -465,7 +477,7 @@ if (includeLocalQC or includeFullQC) and not isdir(qcdir):
 orbitsPerTF=int(args.orbitsPerTF)
 GRP_TASK = createTask(name='grpcreate', cpu='0')
 GRP_TASK['cmd'] = 'o2-grp-simgrp-tool createGRPs --timestamp ' + str(args.timestamp) + ' --run ' + str(args.run) + ' --publishto ${ALICEO2_CCDB_LOCALCACHE:-.ccdb} -o grp --hbfpertf ' + str(orbitsPerTF) + ' --field ' + args.field
-GRP_TASK['cmd'] += ' --readoutDets ' + " ".join(activeDetectors) + ' --print ' + ('','--lhcif-CCDB')[args.run_anchored]
+GRP_TASK['cmd'] += ' --readoutDets ' + " ".join(activeDetectors) + ' --detectorList ' + args.detectorList + ' --print ' + ('','--lhcif-CCDB')[args.run_anchored]
 if (not args.run_anchored == True) and len(args.bcPatternFile) > 0:
     GRP_TASK['cmd'] += '  --bcPatternFile ' + str(args.bcPatternFile)
 if len(CONFKEYMV) > 0:
@@ -475,6 +487,7 @@ if len(CONFKEYMV) > 0:
 workflow['stages'].append(GRP_TASK)
 
 includeQED = (COLTYPE == 'PbPb' or (doembedding and COLTYPEBKG == "PbPb")) or (args.with_qed == True)
+includeQED = False
 signalprefix='sgn'
 
 # No vertexing for event pool generation
@@ -599,7 +612,8 @@ if doembedding:
                      + ' --field ccdb ' + str(CONFKEYBKG)                                                                \
                      + ('',' --timestamp ' + str(args.timestamp))[args.timestamp!=-1] + ' --run ' + str(args.run)        \
                      + ' --vertexMode kCCDB'                                                                             \
-                     + ' --fromCollContext collisioncontext.root:bkg'
+                     + ' --fromCollContext collisioncontext.root:bkg' \
+                     + ' --detectorList ' + args.detectorList
 
         if not isActive('all'):
            BKGtask['cmd'] += ' --readoutDetectors ' + " ".join(activeDetectors)
@@ -633,6 +647,8 @@ if doembedding:
 
 # a list of smaller sensors (used to construct digitization tasks in a parametrized way)
 smallsensorlist = [ "ITS", "TOF", "FDD", "MCH", "MID", "MFT", "HMP", "PHS", "CPV", "ZDC" ]
+if args.run4:
+    smallsensorlist = [ "IT3", "TOF", "FDD", "HMP", "CPV", "ZDC" ]
 # a list of detectors that serve as input for the trigger processor CTP --> these need to be processed together for now
 ctp_trigger_inputlist = [ "FT0", "FV0", "EMC" ]
 
@@ -666,12 +682,13 @@ workflow['stages'].append(TPC_SPACECHARGE_DOWNLOADER_TASK)
 # Detectors that prefer to apply special alignments (for example residual effects) should be listed here and download these files.
 # These object will take precedence over ordinary align objects **and** will only be applied in transport simulation
 # and digitization (Det/Calib/Align is only read in simulation since reconstruction tasks use GLO/Config/AlignedGeometry automatically).
-SIM_ALIGNMENT_PREFETCH_TASK = createTask(name='sim_alignment', cpu='0')
-SIM_ALIGNMENT_PREFETCH_TASK['cmd'] = '${O2_ROOT}/bin/o2-ccdb-downloadccdbfile --host http://alice-ccdb.cern.ch -p MID/MisCalib/Align --timestamp ' + str(args.timestamp) + ' --created-not-after '  \
-                                      + str(args.condition_not_after) + ' -d ${ALICEO2_CCDB_LOCALCACHE}/MID/Calib/Align --no-preserve-path ; '
-SIM_ALIGNMENT_PREFETCH_TASK['cmd'] += '${O2_ROOT}/bin/o2-ccdb-downloadccdbfile --host http://alice-ccdb.cern.ch -p MCH/MisCalib/Align --timestamp ' + str(args.timestamp) + ' --created-not-after ' \
-                                      + str(args.condition_not_after) + ' -d ${ALICEO2_CCDB_LOCALCACHE}/MCH/Calib/Align --no-preserve-path '
-workflow['stages'].append(SIM_ALIGNMENT_PREFETCH_TASK)
+if not args.apply_no_alignment:
+    SIM_ALIGNMENT_PREFETCH_TASK = createTask(name='sim_alignment', cpu='0')
+    SIM_ALIGNMENT_PREFETCH_TASK['cmd'] = '${O2_ROOT}/bin/o2-ccdb-downloadccdbfile --host http://alice-ccdb.cern.ch -p MID/MisCalib/Align --timestamp ' + str(args.timestamp) + ' --created-not-after '  \
+                                          + str(args.condition_not_after) + ' -d ${ALICEO2_CCDB_LOCALCACHE}/MID/Calib/Align --no-preserve-path ; '
+    SIM_ALIGNMENT_PREFETCH_TASK['cmd'] += '${O2_ROOT}/bin/o2-ccdb-downloadccdbfile --host http://alice-ccdb.cern.ch -p MCH/MisCalib/Align --timestamp ' + str(args.timestamp) + ' --created-not-after ' \
+                                          + str(args.condition_not_after) + ' -d ${ALICEO2_CCDB_LOCALCACHE}/MCH/Calib/Align --no-preserve-path '
+    workflow['stages'].append(SIM_ALIGNMENT_PREFETCH_TASK)
 
 # query initial configKey args for signal transport; mainly used to setup generators
 simInitialConfigKeys = create_geant_config(args, args.confKey)
@@ -823,7 +840,8 @@ for tf in range(1, NTIMEFRAMES + 1):
                       relative_cpu=7/8, n_workers=NWORKERS_TF, mem=str(sgnmem))
    sgncmdbase = '${O2_ROOT}/bin/o2-sim -e ' + str(SIMENGINE) + ' '  + str(MODULES) + ' -n ' + str(NSIGEVENTS) + ' --seed ' + str(TFSEED)       \
               + ' --field ccdb -j ' + str(NWORKERS_TF) + ' ' + str(CONFKEY) + ' ' + str(INIFILE) + ' -o ' + signalprefix + ' ' + embeddinto       \
-              + ('', ' --timestamp ' + str(args.timestamp))[args.timestamp!=-1] + ' --run ' + str(args.run)
+              + ('', ' --timestamp ' + str(args.timestamp))[args.timestamp!=-1] + ' --run ' + str(args.run) \
+              + ' --detectorList ' + args.detectorList
    if sep_event_mode:
       SGNtask['cmd'] = sgncmdbase + ' -g extkinO2 --extKinFile genevents_Kine.root ' + ' --vertexMode kNoVertex'
    else:
@@ -1150,9 +1168,12 @@ for tf in range(1, NTIMEFRAMES + 1):
    # END TPC reco
 
    ITSMemEstimate = 12000 if havePbPb else 2000 # PbPb has much large mem requirement for now (in worst case)
-   ITSRECOtask=createTask(name='itsreco_'+str(tf), needs=[getDigiTaskName("ITS")],
+   ITSRECOtask=createTask(name='itsreco_'+str(tf), needs=[getDigiTaskName("IT3") if args.run4 else getDigiTaskName("ITS")],
                           tf=tf, cwd=timeframeworkdir, lab=["RECO"], cpu='1', mem=str(ITSMemEstimate))
-   ITSRECOtask['cmd'] = '${O2_ROOT}/bin/o2-its-reco-workflow --trackerCA --tracking-mode async ' + getDPL_global_options(bigshm=havePbPb) \
+   ITSRECOtask['cmd'] = '${O2_ROOT}/bin/o2-its-reco-workflow --trackerCA'
+   if args.run4:
+       ITSRECOtask['cmd'] = '${O2_ROOT}/bin/o2-its3-reco-workflow'
+   ITSRECOtask['cmd'] += ' --tracking-mode async ' + getDPL_global_options(bigshm=havePbPb) \
                         + putConfigValuesNew(["ITSVertexerParam", "ITSAlpideParam",
                                               "ITSClustererParam", "ITSCATrackerParam"], {"NameConf.mDirMatLUT" : ".."})
    ITSRECOtask['cmd'] += ('',' --disable-mc')[args.no_mc_labels]
