@@ -555,6 +555,19 @@ fi
 # MFT
 [[ -f $PWD/mft_GeometryTGeo.root ]] && mkdir -p $ALICEO2_CCDB_LOCALCACHE/MFT/Config/Geometry && ln -s -f $PWD/mft_GeometryTGeo.root $ALICEO2_CCDB_LOCALCACHE/MFT/Config/Geometry/snapshot.root
 '''
+# For now create for Run 4 geometry the alignment objects on the spot and take them as being ideal
+if args.detectorList == 'ALICE2.1':
+    geom_cmd = f'''
+    o2-sim --detectorList ALICE2.1 -n0
+    mkdir -p $ALICEO2_CCDB_LOCALCACHE/GLO/Config/Geometry
+    ln -s -f $PWD/o2sim_geometry.root $ALICEO2_CCDB_LOCALCACHE/GLO/Config/Geometry/snapshot.root
+    # ccdb objects are for now guaranteed to be ideal ones
+    ${{O2_ROOT}}/bin/o2-create-aligned-geometry-workflow -b --run
+    mkdir -p $ALICEO2_CCDB_LOCALCACHE/GLO/Config/GeometryAligned
+    ln -s -f $PWD/o2sim_geometry-aligned.root $ALICEO2_CCDB_LOCALCACHE/GLO/Config/GeometryAligned/snapshot.root
+    [[ -f $PWD/its_GeometryTGeo.root ]] && mkdir -p $ALICEO2_CCDB_LOCALCACHE/ITS/Config/Geometry && ln -s -f $PWD/its_GeometryTGeo.root $ALICEO2_CCDB_LOCALCACHE/ITS/Config/Geometry/snapshot.root
+    [[ -f $PWD/mft_GeometryTGeo.root ]] && mkdir -p $ALICEO2_CCDB_LOCALCACHE/MFT/Config/Geometry && ln -s -f $PWD/mft_GeometryTGeo.root $ALICEO2_CCDB_LOCALCACHE/MFT/Config/Geometry/snapshot.root
+    '''
 
 with open("geomprefetcher_script.sh",'w') as f:
    f.write(geom_cmd)
